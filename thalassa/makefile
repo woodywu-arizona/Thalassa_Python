@@ -6,11 +6,8 @@ MPIC = gcc
 FCFLAGS = -c -O
 FLFLAGS = -O -o
 # Link flags
-LIBS = /Users/woodywu/Desktop/Research/Software/thalassa_git/spicelib.a \
-/Users/woodywu/Desktop/Research/Proper_Element/thalassaMex/librarySetup/sofa/20180130/f77/src/libsofa.a \
-/usr/local/Cellar/gcc/9.3.0/lib/gcc/9/gcc/x86_64-apple-darwin19/9.3.0/libgcc.a \
-/usr/local/Cellar/gcc/9.3.0/lib/gcc/9/libgfortran.a \
-/usr/local/Cellar/gcc/9.3.0/lib/gcc/9/libquadmath.a \
+LIBS = ./Lib/libspicelib.a \
+./Lib/libsofa.a \
 
 # Numerical integrators
 SLSODAR = opksa1.o opksa2.o opksmain.o
