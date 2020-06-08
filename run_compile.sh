@@ -1,0 +1,1 @@
+f2py -L/Users/woodywu/Desktop/Research/Software/thalassa_f2py/thalassa -lsubthalassa -L/Users/woodywu/Desktop/Research/Software/toolkit_libspicelib/lib -lspicelib -L/Users/woodywu/Desktop/Research/Proper_Element/thalassaMex/librarySetup/sofa/20180130/f77/src/ -lsofa -c ./thalassa/thalassaSub.f90 -m pytha

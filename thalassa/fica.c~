@@ -1,0 +1,952 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <math.h>
+#include <mpi.h>
+#include "semiContig.h"
+#include "rowDouble.h"
+#include "rowInt.h"
+#include "contigDouble.h"
+#include "contigInt.h"
+#include "trajSharing.h"
+#include "batchPropHead.h"
+#include "initializeCol.h"
+#include "exogenous.h"
+#include "endogenous.h"
+#include "reduceStates.h"
+#include "compareTraj.h"
+#include "update.h"
+#include "output.h"
+
+/*main function*/
+int main( int argc, char *argv[] )
+{
+
+    // do MPI Stuff
+    int  numtasks, rank, len, rc; 
+    char hostname[MPI_MAX_PROCESSOR_NAME];
+    int dest;
+    double *rec, *sendObj;
+    int root = 0;
+    int tag = 1;
+    int send;
+    int sender;
+    int completedProcess;
+    int remainder;
+    int rootJobs, nomJobs;
+    struct Input input;
+    int i, j, k;
+    int propStateIdx;
+    double vmax;
+    double tstep1, tstep2, tstep3;
+    struct exoJobParams exoJobs1, exoJobs2, exoJobs3;
+    struct endoJobParams endoJobs1, endoJobs2, endoJobs3;
+    double partialTspan;
+    int mxpts;
+    int combs;
+    int appr1, appr2, appr3;
+    struct redStates *reds, *reds2, *reds3;
+    double **targetStates, **fieldStates;
+    int deltaT;
+    int *targPropJobs, *fieldPropJobs, *trajCompJobs, *targExitCodes, *fieldExitCodes;
+    int *targTrajLengths, *fieldTrajLengths;
+    struct contigDouble *C;
+    struct contigInt *locApproaches;
+    struct contigDouble *sepArr;
+    struct contigDouble *mjdArr;
+    int numTargJobs, numFieldJobs, numCompJobs, *targetMapping, *fieldMapping;
+    struct doubleSemi *targetTraj, *fieldTraj;
+    struct trajShare *targTrajLocs, *fieldTrajLocs;
+    int *globTargetMap, *globFieldMap;
+    int targL, fieldL;
+    int pairs1, pairs2, pairs3;
+    int prevAppr1, prevAppr2, prevAppr3;
+
+    /* global variables */
+    double mu = 3.986004414498200E+05;
+    double d_rec = 100;
+    double d_inter = 10;
+    double d_col = 0.1;
+
+    // Memory Variables
+    double memEstimate = 0;
+    double sumAllocatedMem = 0;
+    double sumDeltaMem = 0;
+    double allocatedMem = 0;
+    double prevMem = 0;
+    double deltaMem = 0;
+    double buff = 0;
+    double buff2 = 0;
+    double buff3 = 0;
+    double targPropJobsMem = 0;
+    double fieldPropJobsMem = 0;
+    double trajCompJobsMem = 0;
+
+    // get input propagation parameters
+    input = getPropInputs(argv[1]);
+
+    // read in target and field object states
+    // printf("getting states\n");
+    targetStates = readObjects(input.targetObjects, input.numTargetObjs);
+    fieldStates = readObjects(input.fieldObjects, input.numFieldObjs);
+
+    // calculate maximum number of combinations of collision events
+    combs = calcEventCombs(input);
+    
+    // allocate space for potential collision events and collisions
+    int **P = allocateInt2DArray(combs, 2, &buff);
+    allocatedMem += buff/1e6;
+    //int **C = allocateInt2DArray(combs, 3);
+
+    // populate P and C arrays
+    popP(P, input);
+    
+    // printf("ready to start mpi\n");
+    // initialize MPI
+    MPI_Init(&argc,&argv);
+    
+	//    printf("started mpi\n");
+    // get number of tasks 
+    MPI_Comm_size(MPI_COMM_WORLD,&numtasks);
+    
+    // get my rank  
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+
+    // SELECT CASE
+    switch(input.endogenous)
+    {
+        // ENDOGENOUS
+        case 1:
+
+            for (deltaT = 0; deltaT < input.numIntervals; deltaT++)
+            {
+                 if (rank == 0) {
+                    printf("TIME CHUNK %d\n",deltaT);
+                    printf("\n=============================================================================\n");
+                    printf("MEMORY INFORMATION\n");
+                    printf("Allocated memory per thread (gigabytes) = %f\n",(allocatedMem/1e+9));
+                    printf("Change in allocated memory per thread (gigabytes) = %f\n", (deltaMem/1e+9));
+                    printf("=============================================================================\n\n\n");
+                 }
+
+                // on first iteration
+                if (deltaT == 0)
+                {
+                    printf("ENDOGENOUS CASE\n");
+                    // allocate object mapping
+                    printf("1\n");
+                    targetMapping = calloc(input.numTargetObjs, sizeof(int));
+                    fieldMapping = calloc(input.numFieldObjs, sizeof(int));
+                    initMapping(targetMapping, input.numTargetObjs);
+                    initMapping(fieldMapping, input.numFieldObjs);
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int);
+
+                    // allocate memory for max propagations jobs
+                    printf("2\n");
+                    targPropJobs = calloc(input.numTargetObjs, sizeof(int));
+                    fieldPropJobs = calloc(input.numFieldObjs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int);
+                    targPropJobsMem = input.numTargetObjs*sizeof(int);
+                    fieldPropJobsMem = input.numFieldObjs*sizeof(int);
+            
+                    // allocate memory for max trajectory comparison jobs
+                    printf("3\n");
+                    trajCompJobs = calloc(combs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += combs*sizeof(int);
+                    trajCompJobsMem = combs*sizeof(int);
+
+                    // allocate memory for exit codes
+                    printf("4\n");
+                    targExitCodes = calloc(input.numTargetObjs, sizeof(int));
+                    fieldExitCodes = calloc(input.numFieldObjs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int);
+
+                    // populate propagation job arrays
+                    initPropArr(targPropJobs, input.numTargetObjs);
+
+                    // populate comparison job arrays
+                    initTrajCompArr(trajCompJobs, combs);
+
+                    // intialize output directory
+                    initDirOut(input.outputDir, input.numIntervals, rank);
+
+                    // allocate memory for trajectory lengths
+                    printf("5\n");
+                    targTrajLengths = calloc(input.numTargetObjs, sizeof(int));
+                    fieldTrajLengths = calloc(input.numFieldObjs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int);
+
+                    // collision array
+                    printf("6\n");
+                    //C = calloc(combs*5, sizeof(double));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += combs*5*sizeof(double);
+
+                    // number of jobs
+                    printf("7\n");
+                    numTargJobs = input.numTargetObjs;
+                    numCompJobs = combs;
+                    printf("45345\n");
+                    MPI_Barrier(MPI_COMM_WORLD);
+
+                    // global mapping
+                    globTargetMap = calloc(input.numTargetObjs, sizeof(int));
+                    allocatedMem += input.numTargetObjs*sizeof(int);
+
+                    // get mxpts for reds initialization
+                    vmax = calcVmax(targetStates, fieldStates, input.numTargetObjs, input.numFieldObjs, input.endogenous);
+                    tstep1 = ((d_rec/vmax)/1.2)/60/60/24;
+                    partialTspan = input.tspan/input.numIntervals;
+                    mxpts = calcMxpts(partialTspan, tstep1);
+
+                    // alloc mem for trajectory structs
+                    targetTraj = malloc(sizeof(struct doubleSemi));
+                    allocatedMem += sizeof(struct doubleSemi);
+
+                    // allocate mem for reds
+                    reds = malloc(sizeof(struct redStates));
+                    reds2 = malloc(sizeof(struct redStates));
+                    reds3 = malloc(sizeof(struct redStates));
+                    if (rank == 0)
+                        printf("vmax: %f ||| mxpts: %d\n",vmax,mxpts);
+                    initReds(reds, &buff, numTargJobs, numFieldJobs, mxpts, numtasks, rank);
+                    initReds(reds2, &buff2, numTargJobs, numFieldJobs, mxpts, numtasks, rank);
+                    initReds(reds3, &buff3, numTargJobs, numFieldJobs, mxpts, numtasks, rank);
+                    allocatedMem += 3*sizeof(struct redStates);
+                    allocatedMem += buff + buff2 + buff3;
+
+                    // allocate memory for collision FICA algorithm
+                    MPI_Barrier(MPI_COMM_WORLD);
+
+                    // allocate and initialize thalassa output data structure
+                    targTrajLocs = malloc(sizeof(struct trajShare));
+                    initTrajShare(targTrajLocs, numTargJobs, &buff, numtasks);
+                    allocatedMem += buff;
+                    
+                }
+
+                // initialize global mapping
+                initMapping(globTargetMap, input.numTargetObjs);
+
+                
+                // calculate maximum velocity
+                vmax = calcVmax(targetStates, fieldStates, input.numTargetObjs, input.numFieldObjs, input.endogenous);
+
+                // calculate tstep for first round
+                tstep1 = ((d_rec/vmax)/2)/60/60/24;
+                
+                // calculate max points
+                partialTspan = input.tspan/input.numIntervals;
+                mxpts = calcMxpts(partialTspan, tstep1);
+
+                // allocate trajectories
+                printf("8\n");
+                if (deltaT == 0)
+                {
+                    alloc3DDoubleSemi(targetTraj, input.numTargetObjs, mxpts, 12);
+                    allocatedMem += *(targetTraj->mem);
+                }
+                else
+                {
+                    // this section caused memory failure
+                    reallocDouble3Dsemi(targetTraj, input.numTargetObjs, mxpts);
+                    allocatedMem -= *(targetTraj->prevmem);
+                    allocatedMem += *(targetTraj->mem);
+
+                }
+
+                
+                //DEBUG
+                if (debug == 1)
+                {
+                    printf("VMAX: %.15f", vmax);
+                    printf("TIMESTEP: %.15f",tstep1);
+                    printf("MAXPOINTS: %d\n",mxpts);
+                }
+
+                // FILTER STAGE 1
+                
+                // calculate number of jobs per cpu for 1st round of filter
+                endoJobs1 = calcEndoJobLengths(input.numCores, numTargJobs, numCompJobs);
+                
+                // propagate 1st round of objects
+                propEndoObjs(rank, endoJobs1, input, targetTraj->arr, targetStates,
+                            mxpts, partialTspan, tstep1, mu, targTrajLengths, numTargJobs, 
+                            targPropJobs, targExitCodes, input.numTargetObjs, targTrajLocs, &allocatedMem, 0);
+
+                // compare trajectories
+                appr1 = compareEndoTraj(rank, targTrajLengths, targetTraj->arr, input, globTargetMap,
+                                endoJobs1, mxpts, P, C->arr, d_rec, numCompJobs, trajCompJobs, targetMapping);
+                
+                // exit if no close approaches recorded
+                if (appr1 == 0)
+                {
+                    updateEndoStates(targetTraj->arr, targetStates, targTrajLengths, targExitCodes, C->arr, P, input.numTargetObjs, 
+                                    combs, targPropJobs, trajCompJobs, rank, &numCompJobs, &numTargJobs, &allocatedMem, 
+                                    &trajCompJobsMem, &targPropJobsMem);
+
+                    // update memory
+                    deltaMem = allocatedMem - prevMem;
+                    prevMem = allocatedMem;
+
+                    // BREAK IF NO MORE JOBS REQUIRED
+                    if (numCompJobs == 0 || numTargJobs == 0)
+                        break;
+                    else {
+                        printf("no stage 1 ca for time chunk %d\n",deltaT);
+                        continue;
+                    }
+                }
+
+                
+                // reduce sets 
+                printf("finished comparing trajectories on filter 1\n");
+                
+                reduceEndoStates(targetStates, targetTraj->arr, C->arr, appr1, numTargJobs, globTargetMap, 
+                                        targTrajLengths, rank, input.endogenous, d_inter, partialTspan, 
+                                        mxpts, targetMapping, &allocatedMem, reds);
+              
+
+                // print output for filter 1
+                printOutput(reds->targetTraj->arr, reds->fieldTraj->arr, reds->targetStates->arr, reds->fieldStates->arr, input.outputDir, 1, deltaT, rank, input.endogenous, appr1, 
+                            reds->targetTrajLengths->arr, reds->fieldTrajLengths->arr, *(reds->numTargetObjs), *(reds->numFieldObjs), reds->C->arr, targetTraj->arr, fieldTraj->arr, targTrajLengths,
+                            fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, reds->targetMapping->arr, reds->fieldMapping->arr, reds->fieldStatus->arr, reds->targStatus->arr);
+
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                printf("stage 1 filter completed\n");
+
+                //calculate number of jobs per cpu for 2nd round of filter
+                endoJobs2 = calcEndoJobLengths(input.numCores, *(reds->numTargetObjs), appr1);
+
+                printf("propagating stage 2 objects\n");
+
+                // propagate 2nd round of objects
+                // propEndoObjs(rank, endoJobs2, input, reds->targetTraj->arr, reds->targetStates->arr, *(reds->mxpts), partialTspan, *(reds->tstep), mu, 
+                //             reds->targetTrajLengths->arr, *(reds->numTargetObjs), reds->targetPropJobs->arr, reds->targExitCodes->arr, *(reds->numTargetObjs), reds->targTrajLocs, &allocatedMem, 0);
+            
+
+                // synchronize processors
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                printf("comparing stage 2 trajectories - %d\n", appr1);
+                // compare trajectories
+                appr2 = compareEndoTraj(rank, reds->targetTrajLengths->arr, reds->targetTraj->arr, input, globTargetMap,
+                                endoJobs2, *(reds->mxpts), reds->P->arr, reds->C->arr, d_inter, appr1, reds->trajCompJobs->arr, reds->targetMapping->arr);
+                
+                // exit if no close approaches recorded
+                if (appr2 == 0)
+                {
+                    updateEndoStates(targetTraj->arr, targetStates, targTrajLengths, targExitCodes, C->arr, P, input.numTargetObjs, 
+                                    combs, targPropJobs, trajCompJobs, rank, &numCompJobs, &numTargJobs, &allocatedMem, 
+                                    &trajCompJobsMem, &targPropJobsMem);
+
+                    // update memory
+                    deltaMem = allocatedMem - prevMem;
+                    prevMem = allocatedMem;
+
+                    // BREAK IF NO MORE JOBS REQUIRED
+                    if (numCompJobs == 0 || numTargJobs == 0)
+                        break;
+                    else {
+                        printf("no stage 2 ca for time chunk %d\n",deltaT);
+                        continue;
+                    }
+                }
+                
+                // reducing sets
+                reduceEndoStates(reds->targetStates->arr, reds->targetTraj->arr, reds->C->arr, appr2, *(reds->numTargetObjs), globTargetMap,
+                                            reds->targetTrajLengths->arr, rank, input.endogenous, d_col, partialTspan, *(reds->mxpts), 
+                                            reds->targetMapping->arr, &allocatedMem, reds2);
+          
+                printf("FINISHED REDUCTION\n");
+
+                //print output for filter 2
+                printOutput(reds2->targetTraj->arr, reds2->fieldTraj->arr, reds2->targetStates->arr, reds2->fieldStates->arr, input.outputDir, 2, deltaT, rank, input.endogenous, appr2, 
+                            reds2->targetTrajLengths->arr, reds2->fieldTrajLengths->arr, *(reds2->numTargetObjs), *(reds2->numFieldObjs), reds2->C->arr, targetTraj->arr, fieldTraj->arr, targTrajLengths,
+                            fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, reds2->targetMapping->arr, reds2->fieldMapping->arr, reds2->fieldStatus->arr, reds2->targStatus->arr);
+
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+         
+
+                // FILTER STAGE 3
+
+                // calculate job parameters
+                endoJobs3 = calcEndoJobLengths(input.numCores, *(reds2->numTargetObjs), appr2);
+
+                printf("propagating stage 3 objects\n");
+                // propagate 2nd round of objects
+                // propEndoObjs(rank, endoJobs3, input, reds2->targetTraj->arr, reds2->targetStates->arr, *(reds2->mxpts), partialTspan, *(reds2->tstep), mu, 
+                //             reds2->targetTrajLengths->arr, *(reds2->numTargetObjs), reds2->targetPropJobs->arr, reds2->targExitCodes->arr, *(reds2->numTargetObjs), reds2->targTrajLocs, &allocatedMem, 0);
+
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                printf("comparing stage 3 trajectories - %d\n", appr1);
+                // compare trajectories
+                appr3 = compareEndoTraj(rank, reds2->targetTrajLengths->arr, reds2->targetTraj->arr, input, globTargetMap,
+                                endoJobs3, *(reds2->mxpts), reds2->P->arr, reds2->C->arr, d_col, appr2, reds->trajCompJobs->arr, reds2->targetMapping->arr);
+                
+                // exit if no close approaches recorded
+                if (appr3 == 0)
+                {
+                    updateEndoStates(targetTraj->arr, targetStates, targTrajLengths, targExitCodes, C->arr, P, input.numTargetObjs, combs, 
+                                    targPropJobs, trajCompJobs, rank, &numCompJobs, &numTargJobs, &allocatedMem, 
+                                    &trajCompJobsMem, &targPropJobsMem);
+                    
+                    // update memory
+                    deltaMem = allocatedMem - prevMem;
+                    prevMem = allocatedMem;
+
+                    // BREAK IF NO MORE JOBS REQUIRED
+                    if (numCompJobs == 0 || numTargJobs == 0)
+                        break;
+                    else {
+                        printf("no stage 3 ca for time chunk %d\n",deltaT);
+                        continue;
+                    }
+                    
+                }
+
+                // reduce sets
+                reduceEndoStates(reds2->targetStates->arr, reds2->targetTraj->arr, reds2->C->arr, appr3, *(reds2->numTargetObjs), globTargetMap,
+                                            reds2->targetTrajLengths->arr, rank, input.endogenous, d_col, partialTspan, *(reds2->mxpts), 
+                                            reds2->targetMapping->arr, &allocatedMem, reds3);
+
+                //print output for filter 3
+                printOutput(reds3->targetTraj->arr, reds3->fieldTraj->arr, reds3->targetStates->arr, reds3->fieldStates->arr, input.outputDir, 3, deltaT, rank, input.endogenous, appr3, 
+                            reds3->targetTrajLengths->arr, reds3->fieldTrajLengths->arr, *(reds3->numTargetObjs), *(reds3->numFieldObjs), reds3->C->arr, targetTraj->arr, fieldTraj->arr, targTrajLengths,
+                            fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, reds3->targetMapping->arr, reds3->fieldMapping->arr, reds3->fieldStatus->arr, reds3->targStatus->arr);
+                
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+                printf("FINISHED REDUCTION\n");
+
+                //UPDATE FOR NEXT ITERATION
+                printf("updating\n");
+                updateEndoStates(targetTraj->arr, targetStates, targTrajLengths, targExitCodes, C->arr, P, input.numTargetObjs, combs, 
+                                targPropJobs, trajCompJobs, rank, &numCompJobs, &numTargJobs, &allocatedMem,
+                                &trajCompJobsMem, &targPropJobsMem);
+                
+                // BREAK IF NO MORE JOBS REQUIRED
+                if (numCompJobs == 0 || numTargJobs == 0)
+                    break;
+
+                // update memory
+                deltaMem = allocatedMem - prevMem;
+                prevMem = allocatedMem;
+
+
+            }
+
+            // done with MPI  
+            MPI_Finalize();
+
+            break;
+
+        // EXOGENOUS
+        case 0:
+
+            for (deltaT = 0; deltaT < input.numIntervals; deltaT++)
+            {   
+                // sum memory
+                MPI_Allreduce(&allocatedMem, &sumAllocatedMem, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                MPI_Allreduce(&deltaMem, &sumDeltaMem, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+                // print memory use summary
+                if (rank == 0) {
+                    printf("TIME CHUNK %d of %d\n",deltaT, input.numIntervals);
+                    printf("\n\n=============================================================================\n");
+                    printf("MEMORY INFORMATION\n");
+                    printf("Allocated memory (gigabytes) = %f\n",(sumAllocatedMem/1e+3));
+                    printf("Change in allocated memory (gigabytes) = %f\n", (sumDeltaMem/1e+3));
+                    printf("=============================================================================\n\n\n");
+                }
+
+                // on first iteration
+                if (deltaT == 0)
+                {
+                    if (rank == 0)
+                        printf("EXOGENOUS CASE\n");
+                    // allocate object mapping
+                    targetMapping = calloc(input.numTargetObjs, sizeof(int));
+                    fieldMapping = calloc(input.numFieldObjs, sizeof(int));
+                    initMapping(targetMapping, input.numTargetObjs);
+                    initMapping(fieldMapping, input.numFieldObjs);
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int)/1e6;
+
+                    // allocate memory for max propagations jobs
+                    targPropJobs = calloc(input.numTargetObjs, sizeof(int));
+                    fieldPropJobs = calloc(input.numFieldObjs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int)/1e6;
+                    targPropJobsMem = input.numTargetObjs*sizeof(int)/1e6;
+                    fieldPropJobsMem = input.numFieldObjs*sizeof(int)/1e6;
+            
+                    // allocate memory for max trajectory comparison jobs
+                    trajCompJobs = calloc(combs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += combs*sizeof(int)/1e6;
+                    trajCompJobsMem = combs*sizeof(int)/1e6;
+
+                    // allocate memory for exit codes
+                    targExitCodes = calloc(input.numTargetObjs, sizeof(int));
+                    fieldExitCodes = calloc(input.numFieldObjs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int)/1e6;
+
+                    // populate propagation job arrays
+                    initPropArr(targPropJobs, input.numTargetObjs);
+                    initPropArr(fieldPropJobs, input.numFieldObjs);
+
+                    // populate comparison job arrays
+                    initTrajCompArr(trajCompJobs, combs);
+
+                    // intialize output directory
+                    initDirOut(input.outputDir, input.numIntervals, rank);
+
+                    // allocate memory for trajectory lengths
+                    targTrajLengths = calloc(input.numTargetObjs, sizeof(int));
+                    fieldTrajLengths = calloc(input.numFieldObjs, sizeof(int));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += (input.numTargetObjs + input.numFieldObjs)*sizeof(int)/1e6;
+                    
+                    // print memory allocation estimate 1
+                    if(deltaT == 0)
+                    {
+                        MPI_Allreduce(&allocatedMem, &memEstimate, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                        if(rank == 0)
+                            printf("Minmum memory requirement(gigabytes) 1 = %f\n",(memEstimate/1e+3));
+                    }
+                    
+
+                    // collision array
+                    C = malloc(sizeof(struct contigDouble));
+                    locApproaches = malloc(sizeof(struct contigInt));
+                    sepArr = malloc(sizeof(struct contigDouble));
+                    mjdArr = malloc(sizeof(struct contigDouble));
+                    if(rank == 0)
+                        allocContigDouble(C, 100*4);
+                    else
+                        allocContigDouble(C, 1);
+                    allocContigInt(locApproaches, 100);
+                    allocContigDouble(sepArr, 100);
+                    allocContigDouble(mjdArr, 100);
+                    //C = calloc(combs*4, sizeof(double));
+                    MPI_Barrier(MPI_COMM_WORLD);
+                    allocatedMem += *(C->mem);
+                    allocatedMem += *(locApproaches->mem);
+                    allocatedMem += *(sepArr->mem);
+                    allocatedMem += *(mjdArr->mem);
+
+                    // print memory allocation estimate 2
+                    if(deltaT == 0)
+                    {
+                        MPI_Allreduce(&allocatedMem, &memEstimate, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                        if(rank == 0)
+                            printf("Minmum memory requirement(gigabytes) 2 = %f\n",(memEstimate/1e+3));
+                    }
+
+                    // number of jobs
+                    numTargJobs = input.numTargetObjs;
+                    numFieldJobs = input.numFieldObjs;
+                    numCompJobs = combs;
+                    MPI_Barrier(MPI_COMM_WORLD);
+
+                    // global mapping
+                    globTargetMap = calloc(input.numTargetObjs, sizeof(int));
+                    globFieldMap = calloc(input.numFieldObjs, sizeof(int));
+                    allocatedMem += (input.numFieldObjs + input.numTargetObjs)*sizeof(int)/1e6;
+
+                    // initialize 1 to 1 global mapping
+                    // printf("initialize global mapping\n");
+                    initMapping(globTargetMap, input.numTargetObjs);
+                    initMapping(globFieldMap, input.numFieldObjs);
+
+                    // alloc mem for trajectory structs
+                    targetTraj = malloc(sizeof(struct doubleSemi));
+                    fieldTraj = malloc(sizeof(struct doubleSemi));
+                    allocatedMem += 2*sizeof(struct doubleSemi)/1e6;
+
+                    // allocate mem for reds
+                    reds = malloc(sizeof(struct redStates));
+                    reds2 = malloc(sizeof(struct redStates));
+                    reds3 = malloc(sizeof(struct redStates));
+
+                    // allocate memory for collision FICA algorithm
+                    MPI_Barrier(MPI_COMM_WORLD);
+
+                    // allocate memory for trajectory locations
+                    fieldTrajLocs = malloc(sizeof(struct trajShare));
+                    targTrajLocs = malloc(sizeof(struct trajShare));
+                    initTrajShare(fieldTrajLocs, numFieldJobs, &buff, numtasks);
+                    initTrajShare(targTrajLocs, numTargJobs, &buff2, numtasks);
+                    allocatedMem += buff + buff2;
+
+                    // save previous number of combs
+                    prevAppr1 = combs;
+                    
+                    // print memory allocation estimate 3
+                    if(deltaT == 0)
+                    {
+                        MPI_Allreduce(&allocatedMem, &memEstimate, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                        if(rank == 0)
+                            printf("Minmum memory requirement(gigabytes) 3 = %f\n",(memEstimate/1e+3));
+                    }
+                }
+
+
+                // calculate maximum velocity
+                // printf("calculate max velocity\n");
+                vmax = calcVmax(targetStates, fieldStates, input.numTargetObjs, input.numFieldObjs, input.endogenous);
+
+                // calculate tstep for first round
+                // printf("calculate tstep for first round\n");
+                tstep1 = ((d_rec/vmax)/2)/60/60/24;
+                
+                // calculate max points
+                // printf("calculate max points\n");
+                partialTspan = input.tspan/input.numIntervals;
+                mxpts = calcMxpts(partialTspan, tstep1);
+                if(rank == 0)
+                    printf("vmax = %f ||| mxpts = %d\n",vmax,mxpts);
+
+                // initialize reds 
+                if (deltaT == 0)
+                {
+                    initReds(reds, &buff, numTargJobs, numFieldJobs, mxpts*10, numtasks, rank);
+                    initReds(reds2, &buff2, numTargJobs, numFieldJobs, mxpts*10, numtasks, rank);
+                    initReds(reds3, &buff3, numTargJobs, numFieldJobs, mxpts*10, numtasks, rank);
+                    allocatedMem += 3*sizeof(struct redStates);
+                    allocatedMem += buff + buff2 + buff3;
+                    allocatedMem += buff + buff2;
+                }
+
+                // print memory allocation estimate 4
+                if(deltaT == 0)
+                {
+                    MPI_Allreduce(&allocatedMem, &memEstimate, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                    if(rank == 0)
+                        printf("Minmum memory requirement(gigabytes) 4 = %f\n",(memEstimate/1e+3));
+                }
+                
+                //DEBUG
+                if (debug == 1)
+                {
+                    printf("VMAX: %.15f", vmax);
+                    printf("TIMESTEP: %.15f",tstep1);
+                    printf("MAXPOINTS: %d\n",mxpts);
+                }
+
+                // FILTER STAGE 1
+                
+                // calculate number of jobs per cpu for 1st round of filter
+                // printf("calculate number of jobs per cpu for 1st round of filter\n");
+                exoJobs1 = calcExoJobLengths(input.numCores, numTargJobs, numFieldJobs, numCompJobs);
+
+                // allocate trajectories
+                if ( rank == 0)
+                    printf("allocating trajectories\n");
+                if (rank == 0)
+                {
+                    targL = input.numTargetObjs;
+                    fieldL = input.numFieldObjs;
+                }
+                else
+                {
+                    targL = 1;
+                    fieldL = 1;
+
+                }
+                if (deltaT == 0)
+                {
+                    // printf("ranke %d allocating on  %d - %d - %d\n",rank,mxpts,targL,fieldL);
+                    alloc3DDoubleSemi(targetTraj, targL, mxpts*2, 12);
+                    alloc3DDoubleSemi(fieldTraj, fieldL, mxpts*2, 12);
+                    allocatedMem += ( *(targetTraj->mem) + *(fieldTraj->mem) );
+                }
+                else
+                {
+                    // printf("ranke %d reallocating on  %d - %d - %d\n",rank,mxpts,targL,fieldL);
+                    reallocDouble3Dsemi(targetTraj,targL, mxpts);
+                    reallocDouble3Dsemi(fieldTraj,fieldL, mxpts);
+                    allocatedMem -= ( *(targetTraj->mem) + *(fieldTraj->mem) );
+                    allocatedMem += ( *(targetTraj->prevmem) + *(fieldTraj->prevmem) );
+                    // printf("done on ranke %d\n",rank);
+                }
+
+                // print memory allocation estimate main
+                if(deltaT == 0)
+                {
+                    MPI_Allreduce(&allocatedMem, &memEstimate, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+                    if(rank == 0)
+                        printf("Minmum memory requirement(gigabytes) = %f\n",(memEstimate/1e+3));
+                }
+                //break;
+
+                // propagate 1st round of objects
+                if ( rank == 0 )
+                    printf("propagate 1st round of target objects -> %d\n",mxpts);
+                propTargObjs(rank, exoJobs1, input, targetTraj->arr, targetStates,
+                            mxpts, partialTspan, tstep1, mu, targTrajLengths, numTargJobs, targPropJobs, 
+                            targExitCodes, input.numTargetObjs, &allocatedMem, 100, numtasks);
+                // printf("done with target propagations on rank: %d\n",rank);
+                if ( rank == 0 )
+                    printf("propagate 1st round of field objects -> %d\n",mxpts);
+                propFieldObjs(rank, exoJobs1, input, fieldTraj->arr, fieldStates,
+                              mxpts, partialTspan, tstep1, mu, fieldTrajLengths, numFieldJobs, fieldPropJobs, 
+                              fieldExitCodes, input.numFieldObjs, &allocatedMem, 100, numtasks);
+                // printf("done with field prop on rank: %d\n",rank);
+
+                // compare trajectories
+                if ( rank == 0 )
+                    printf("compare trajectories\n");
+                appr1 = compareExoTraj(rank, targTrajLengths, fieldTrajLengths, targetTraj->arr, fieldTraj->arr, input, exoJobs1, mxpts, P, C, 
+                                       trajCompJobs, globTargetMap, globFieldMap, d_rec, numCompJobs, numtasks, &pairs1, locApproaches, 
+                                       sepArr, mjdArr, &allocatedMem, reds, targExitCodes, fieldExitCodes);
+                
+                // exit if no close approaches recorded
+                // printf("exit if no close approaches recorded\n");
+                if (appr1 == 0)
+                {
+                    if ( rank == 0 )
+                        printf("no close approaches\n");
+                    updateExoStates(targetTraj->arr, targetStates, targTrajLengths, fieldTraj->arr, fieldStates, fieldTrajLengths, targExitCodes,
+                                 fieldExitCodes, C, P, input.numTargetObjs, input.numFieldObjs, combs, targPropJobs, fieldPropJobs, 
+                                 trajCompJobs, rank, &numCompJobs, &numTargJobs, &numFieldJobs, &allocatedMem,
+                                 &trajCompJobsMem, &targPropJobsMem, &fieldPropJobsMem, appr1);
+                    
+                    // update memory
+                    deltaMem = allocatedMem - prevMem;
+                    prevMem = allocatedMem;
+
+                    // BREAK IF NO MORE JOBS REQUIRED
+                    if (numCompJobs == 0 || numTargJobs == 0 || numFieldJobs == 0)
+                    {
+                        // printf("no more jobs required\n");
+                        break;
+                    }
+                    else {
+                        // printf("no stage 1 ca in time chunk %d\n",deltaT);
+                        continue;
+                    }
+                }
+
+                if (rank == 0)
+                    printf("stage 1 collision detected\n");
+                MPI_Barrier(MPI_COMM_WORLD);
+            
+                // reduce sets 
+                if ( rank == 0 )
+                    printf("reducing sets\n");
+                printf("1 reds 2 P stats on rank %d:\n",rank);
+                printf("1 REDS 2 STATS on rank %d: num rows: %d --- num columns: %d --- mem: %f\n",rank,*(reds2->P->rows),*(reds2->P->columns),*(reds2->P->mem));
+                reduceExoStates(targetStates, fieldStates, C, appr1, input.numTargetObjs, input.numFieldObjs, rank, d_inter, partialTspan, &allocatedMem, reds, deltaT, 1, numtasks, pairs1,reds2);
+                printf("2 reds 2 P stats on rank %d:\n",rank);
+                printf("2 REDS 2 STATS on rank %d: num rows: %d --- num columns: %d --- mem: %f\n",rank,*(reds2->P->rows),*(reds2->P->columns),*(reds2->P->mem));
+              
+
+                // print output for filter 1
+                if (rank == 0)
+                    printf("printing stage 1 output\n");
+                printOutput(targetTraj->arr, fieldTraj->arr, targetStates, fieldStates, input.outputDir, 1, deltaT, rank, input.endogenous, appr1, 
+                            targTrajLengths, fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, C->arr, targetTraj->arr, fieldTraj->arr, targTrajLengths,
+                            fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, globTargetMap, globFieldMap, reds->fieldStatus->arr, reds->targStatus->arr);
+
+                printf("3 reds 2 P stats on rank %d:\n",rank);
+                printf("3 REDS 2 STATS on rank %d: num rows: %d --- num columns: %d --- mem: %f\n",rank,*(reds2->P->rows),*(reds2->P->columns),*(reds2->P->mem));
+
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                //calculate number of jobs per cpu for 2nd round of filter
+                if ( rank == 0 )
+                    printf("calculate number of jobs per cpu for 2nd round of filter on core: %d\n",rank);
+                exoJobs2 = calcExoJobLengths(input.numCores, *(reds->numTargetObjs), *(reds->numFieldObjs), pairs1);
+
+                // propagate 2nd round of objects
+                if ( rank == 0 )
+                    printf("propagate 2nd round target of objects -> %d\n", *(reds->mxpts));
+                propTargObjs(rank, exoJobs2, input, reds->targetTraj->arr, reds->targetStates->arr,
+                            *(reds->mxpts), partialTspan, *(reds->tstep), mu, reds->targetTrajLengths->arr, *(reds->numTargetObjs), reds->targetPropJobs->arr, 
+                            reds->targExitCodes->arr, *(reds->numTargetObjs), &allocatedMem, 10, numtasks);
+                if ( rank == 0 )
+                    printf("propagate 2nd round of field objects -> %d\n", *(reds->mxpts));
+                propFieldObjs(rank, exoJobs2, input, reds->fieldTraj->arr, reds->fieldStates->arr,
+                              *(reds->mxpts), partialTspan, *(reds->tstep), mu, reds->fieldTrajLengths->arr, *(reds->numFieldObjs), reds->fieldPropJobs->arr, 
+                              reds->fieldExitCodes->arr, *(reds->numFieldObjs), &allocatedMem, 10, numtasks);
+
+                // synchronize processors
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                // compare trajectories
+                if ( rank == 0 )
+                    printf("compare trajectories\n");
+                appr2 = compareExoTraj(rank, reds->targetTrajLengths->arr, reds->fieldTrajLengths->arr, reds->targetTraj->arr, reds->fieldTraj->arr, input, exoJobs2, 
+                                       *(reds->mxpts), reds->P->arr, reds->C, reds->trajCompJobs->arr, reds->targetMapping->arr, reds->fieldMapping->arr, d_inter, 
+                                       pairs1, numtasks, &pairs2, reds->locApproaches, reds->sepArr, reds->mjdArr, &allocatedMem, reds2,
+                                       reds->targExitCodes->arr, reds->fieldExitCodes->arr);
+                
+                // exit if no close approaches recorded
+                if (appr2 == 0)
+                {
+                    if ( rank == 0 )
+                        printf("no close approaches\n");
+                    updateExoStates(targetTraj->arr, targetStates, targTrajLengths, fieldTraj->arr, fieldStates, fieldTrajLengths, targExitCodes,
+                                 fieldExitCodes, C, P, input.numTargetObjs, input.numFieldObjs, combs, targPropJobs, fieldPropJobs, 
+                                 trajCompJobs, rank, &numCompJobs, &numTargJobs, &numFieldJobs, &allocatedMem,  
+                                 &trajCompJobsMem, &targPropJobsMem, &fieldPropJobsMem, appr1);
+
+                    // update memory
+                    deltaMem = allocatedMem - prevMem;
+                    prevMem = allocatedMem;
+
+                    // BREAK IF NO MORE JOBS REQUIRED
+                    if (numCompJobs == 0 || numTargJobs == 0 || numFieldJobs == 0)
+                    {
+                        // printf("no more jobs required\n");
+                        break;
+                    }
+                    else {
+                        continue;
+                    }
+                }
+
+                if (rank == 0)
+                    printf("stage 2 collision detected\n");
+                
+                // reducing sets
+                if ( rank == 0 )
+                    printf("reducing round 2 sets\n");
+                reduceExoStates(targetStates, fieldStates, reds->C, appr2, input.numTargetObjs, input.numFieldObjs, rank, 
+                                         d_col, partialTspan, &allocatedMem, reds2, deltaT, 2, numtasks, pairs2, reds2);
+          
+                //print output for filter 2
+                if ( rank == 0 )
+                    printf("print round 2 filter\n");
+                printOutput(reds->targetTraj->arr, reds->fieldTraj->arr, reds->targetStates->arr, reds->fieldStates->arr, input.outputDir, 2, deltaT, rank, input.endogenous, appr2, 
+                            reds->targetTrajLengths->arr, reds->fieldTrajLengths->arr, input.numTargetObjs, input.numFieldObjs, reds->C->arr, targetTraj->arr, fieldTraj->arr, targTrajLengths,
+                            fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, reds->targetMapping->arr, reds->fieldMapping->arr, reds2->fieldStatus->arr, reds2->targStatus->arr);
+
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+         
+
+                // FILTER STAGE 3
+
+                // calculate job parameters
+                // printf("calculate round 3 parameters\n");
+                exoJobs3 = calcExoJobLengths(input.numCores, *(reds2->numTargetObjs), *(reds2->numFieldObjs), pairs2);
+
+                // propagate 3rd round of objects
+                if ( rank == 0 )
+                {
+                    printf("propagate 3rd round target of objects\n");
+                    //printf("reqd pts: %d - - - allocd pts: %d",*(reds2->mxpts), *(reds2->targetTraj->rows));
+                }
+                propTargObjs(rank, exoJobs3, input, reds2->targetTraj->arr, reds2->targetStates->arr,
+                            *(reds2->mxpts), partialTspan, *(reds2->tstep), mu, reds2->targetTrajLengths->arr, *(reds2->numTargetObjs), reds2->targetPropJobs->arr, 
+                            reds2->targExitCodes->arr, *(reds2->numTargetObjs), &allocatedMem, 10, numtasks);
+                if ( rank == 0 )
+                    printf("propagate 3rd round field objects -> %d\n", *(reds2->mxpts));
+                propFieldObjs(rank, exoJobs3, input, reds2->fieldTraj->arr, reds2->fieldStates->arr,
+                              *(reds2->mxpts), partialTspan, *(reds2->tstep), mu, reds2->fieldTrajLengths->arr, *(reds2->numFieldObjs), reds2->fieldPropJobs->arr, 
+                              reds2->fieldExitCodes->arr, *(reds2->numFieldObjs), &allocatedMem, 10, numtasks);            
+
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                // compare trajectories
+                if ( rank == 0 )
+                    printf("compare round 3 trajectories\n");
+                appr3 = compareExoTraj(rank, reds2->targetTrajLengths->arr, reds2->fieldTrajLengths->arr, reds2->targetTraj->arr, reds2->fieldTraj->arr, input, exoJobs3, 
+                                       *(reds2->mxpts), reds2->P->arr, reds2->C, reds2->trajCompJobs->arr, reds2->targetMapping->arr, reds2->fieldMapping->arr, d_col, 
+                                       pairs2, numtasks, &pairs3, reds2->locApproaches, reds2->sepArr, reds2->mjdArr, &allocatedMem, reds3,
+                                       reds2->targExitCodes->arr, reds2->fieldExitCodes->arr);
+                
+                 // exit if no close approaches recorded
+                if (appr3 == 0)
+                {
+                    if ( rank == 0 )
+                        printf("no close approaches recorded\n");
+                    updateExoStates(targetTraj->arr, targetStates, targTrajLengths, fieldTraj->arr, fieldStates, fieldTrajLengths, targExitCodes,
+                                 fieldExitCodes, C, P, input.numTargetObjs, input.numFieldObjs, combs, targPropJobs, fieldPropJobs, 
+                                 trajCompJobs, rank, &numCompJobs, &numTargJobs, &numFieldJobs, &allocatedMem,  
+                                 &trajCompJobsMem, &targPropJobsMem, &fieldPropJobsMem, pairs3);
+
+                    // update memory
+                    deltaMem = allocatedMem - prevMem;
+                    prevMem = allocatedMem;
+
+                    // BREAK IF NO MORE JOBS REQUIRED
+                    if (numCompJobs == 0 || numTargJobs == 0 || numFieldJobs == 0)
+                    {
+                        // printf("no more jobs required\n");
+                        break;
+                    }
+                    else {
+                        continue;
+                    }
+                }
+
+                if (rank == 0)
+                    printf("stage 3 collision detected\n");
+
+                // reduce sets
+                if ( rank == 0 )
+                    printf("reduce round 3 exo states\n");
+                reduceExoStates(reds2->targetStates->arr, reds2->fieldStates->arr, reds2->C, appr3, input.numTargetObjs, 
+                                        input.numFieldObjs, rank, d_col, partialTspan, &allocatedMem, reds3, deltaT, 3, numtasks, pairs3, reds2);
+
+                //print output for filter 3
+                if ( rank == 0 )
+                    printf("printing round 3 output\n");
+                printOutput(reds2->targetTraj->arr, reds2->fieldTraj->arr, reds2->targetStates->arr, reds2->fieldStates->arr, input.outputDir, 3, deltaT, rank, input.endogenous, appr3, 
+                            reds2->targetTrajLengths->arr, reds2->fieldTrajLengths->arr, input.numTargetObjs, input.numFieldObjs, reds2->C->arr, targetTraj->arr, fieldTraj->arr, targTrajLengths,
+                            fieldTrajLengths, input.numTargetObjs, input.numFieldObjs, reds2->targetMapping->arr, reds2->fieldMapping->arr, reds3->fieldStatus->arr, reds3->targStatus->arr);
+                
+                // synchronize
+                MPI_Barrier(MPI_COMM_WORLD);
+
+                //UPDATE FOR NEXT ITERATION
+                if ( rank == 0 )
+                    printf("updating for next iteration\n");
+                updateExoStates(targetTraj->arr, targetStates, targTrajLengths, fieldTraj->arr, fieldStates, fieldTrajLengths, targExitCodes,
+                                 fieldExitCodes, C, P, input.numTargetObjs, input.numFieldObjs, combs, targPropJobs, fieldPropJobs, 
+                                 trajCompJobs, rank, &numCompJobs, &numTargJobs, &numFieldJobs, &allocatedMem,  
+                                 &trajCompJobsMem, &targPropJobsMem, &fieldPropJobsMem, appr1);
+                
+                // BREAK IF NO MORE JOBS REQUIRED
+                if (numCompJobs == 0 || numTargJobs == 0 || numFieldJobs == 0)
+                {
+                    // printf("no more jobs required\n");
+                    break;
+                }
+
+                // update memory
+                deltaMem = allocatedMem - prevMem;
+                prevMem = allocatedMem;
+
+
+            }
+            
+            if ( rank == 0 )
+                printf("EXITING SUCCESSFULLY\n");
+
+            // done with MPI  
+            MPI_Finalize();
+
+            break;
+    }   
+
+
+}
