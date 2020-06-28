@@ -27,7 +27,7 @@ isun    = 1
 imoon   = 1
 idrag   = 4
 iF107   = 1
-iSRP    = 1
+iSRP    = 2
 iephem  = 1
 gdeg    = 15
 gord    = 15
@@ -43,7 +43,7 @@ eqs = 2
 
 # external definition
 npts = 0
-mxpts = int(tspan/tstep + 1)
+mxpts = round(tspan/tstep) + 1
 cart_out = [[0 for x in range(mxpts)] for x in range(7)]
 orbs_out = [[0 for x in range(mxpts)] for x in range(7)]
 tag = 1

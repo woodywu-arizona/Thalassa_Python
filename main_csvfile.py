@@ -30,7 +30,7 @@ tspan = 365*20
 tstep = 2.0
 # external definition
 npts = 0
-mxpts = int(tspan/tstep + 1)
+mxpts = round(tspan/tstep) + 1
 cart_out = [[0 for x in range(mxpts)] for x in range(7)]
 orbs_out = [[0 for x in range(mxpts)] for x in range(7)]
 tag = 1
