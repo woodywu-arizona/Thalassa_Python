@@ -331,7 +331,7 @@ quit_flag = .false.
 exitcode  = -10
 
 ! Approximate number of steps to be taken
-nsteps = int((MJDf - MJD0)/(MJDnext - MJD0))
+nsteps = nint((MJDf - MJD0)/(MJDnext - MJD0))
 ! write(*,*)"nsteps = ",nsteps
 ! write(*,*)"span,step = ",MJDf-MJD0,(MJDnext-MJD0)
 print_each = nsteps/20
