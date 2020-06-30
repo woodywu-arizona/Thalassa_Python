@@ -35,7 +35,7 @@ cart_out = [[0 for x in range(mxpts)] for x in range(7)]
 orbs_out = [[0 for x in range(mxpts)] for x in range(7)]
 tag = 1
 exitcode = 0
-rmxstep = 200000
+rmxstep = 1000
 
 file_input_dir = '/Users/woodywu/Desktop/Research/Proper_Element/Proper_Element_Data_Association_Study/Data_Theo'
 file_input_nam = 'lngtrm_TheoCompara_orbs'
@@ -61,9 +61,10 @@ def trajectory_from_row(row):
     file_output_cart = file_output_general_dir+'/'+file_output_nam_cart
     np.savetxt(file_output_orbs,orbs_out.transpose(),delimiter=',')
     np.savetxt(file_output_cart,cart_out.transpose(),delimiter=',')
+    print('success\t',row[0])
     return
 
-with Pool(10) as p:
+with Pool(1) as p:
     p.map(trajectory_from_row,data)
 
 total_time = time.time() - start_time

@@ -48,7 +48,7 @@ cart_out = [[0 for x in range(mxpts)] for x in range(7)]
 orbs_out = [[0 for x in range(mxpts)] for x in range(7)]
 tag = 1
 exitcode = 0
-rmxstep = 200000
+rmxstep = 1000
 
 # call python thalassa module
 [cart_out,orbs_out]=pytha.thalassasub(MJD0,COE0,tspan,tstep, insgrav, isun, imoon, idrag, iF107, iSRP, iephem, gdeg, gord, rmxstep, tol, imcoll, eqs, SCMass, ADrag, ASRP, CD, CR, mxpts, npts, tag, exitcode)

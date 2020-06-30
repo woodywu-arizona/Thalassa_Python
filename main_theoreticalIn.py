@@ -53,7 +53,7 @@ cart_out = [[0 for x in range(mxpts)] for x in range(7)]
 orbs_out = [[0 for x in range(mxpts)] for x in range(7)]
 tag = 1
 exitcode = 0
-rmxstep = 200000
+rmxstep = 1000
 
 file_output_dir = '/Users/woodywu/Desktop/Research/Proper_Element/Proper_Element_Data_Association_Study/Data_Theo'
 file_output_nam_orbs = 'lngtrm_TheoCompara_orbs.csv'

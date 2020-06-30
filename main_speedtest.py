@@ -48,7 +48,7 @@ cart_out = [[0 for x in range(mxpts)] for x in range(7)]
 orbs_out = [[0 for x in range(mxpts)] for x in range(7)]
 tag = 1
 exitcode = 0
-rmxstep = 200000
+rmxstep = 1000
 
 N = 100
 start_time = time.time()
